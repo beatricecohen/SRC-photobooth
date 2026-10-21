@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Photobooth</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- 1. Home -->
+<section id="home" class="screen active">
+  <p class="eyebrow">sunway robotics club</p>
+  <button id="startBtn" class="big-btn">Take a photo</button>
+</section>
+
+<!-- 3. Template page (full page, after the photos are taken) -->
+<section id="templates" class="screen">
+  <header class="topbar">
+    <button class="btn ghost small" data-go="camera">← Retake photos</button>
+    <h2>Choose your template</h2>
+    <span></span>
+  </header>
+  <nav id="tabs" class="tabs">
+    <button class="tab sel" data-cat="all">All</button>
+    <button class="tab" data-cat="4">4 photostrip</button>
+    <button class="tab" data-cat="3">3 photostrip</button>
+    <button class="tab" data-cat="a5">A5 paper</button>
+  </nav>
+  <div id="tplGrid" class="tpl-grid"></div>
+</section>
+
+<!-- 2. Camera + effects page -->
+<section id="camera" class="screen">
+  <header class="topbar">
+    <button class="btn ghost small" data-go="home">← Back</button>
+    <h2>Pick your effects</h2>
+    <span id="shotInfo" class="shot-info"></span>
+  </header>
+  <div class="fx-layout">
+    <div class="preview-wrap">
+      <canvas id="live"></canvas>
+      <div id="countdown"></div>
+      <div id="flash"></div>
+      <p id="status" class="status">Starting camera…</p>
+    </div>
+    <aside class="fx-side">
+      <h3>Colour filter</h3>
+      <div id="colorRow" class="options"></div>
+      <h3>Effects <small>(tap to mix)</small></h3>
+      <div id="fxGrid" class="fx-grid"></div>
+      <button id="shootBtn" class="btn big" disabled>Start</button>
+    </aside>
+  </div>
+</section>
+
+<!-- 4. Arrange: pick which photo goes in each spot -->
+<section id="arrange" class="screen">
+  <header class="topbar">
+    <button class="btn ghost small" data-go="templates">← Templates</button>
+    <h2 id="arrangeTitle">Arrange</h2>
+    <span></span>
+  </header>
+  <div class="arr-layout">
+    <canvas id="strip"></canvas>
+    <aside class="arr-side">
+      <h3>Your photos</h3>
+      <p id="pickHint" class="hint"></p>
+      <div id="shotRow" class="shot-row"></div>
+      <p id="saved" class="saved"></p>
+      <div class="row">
+        <button class="btn ghost" data-go="camera">Retake all</button>
+        <a id="downloadBtn" class="btn ghost" download="photobooth.jpg">Download</a>
+        <button class="btn" id="nextBtn">Next: email it →</button>
+      </div>
+    </aside>
+  </div>
+</section>
+
+<!-- 5. Email -->
+<section id="email" class="screen">
+  <h2>Want a copy?</h2>
+  <p class="eyebrow">We'll email you the photo strip and your 5 photos.</p>
+  <form id="emailForm" class="email-form">
+    <input id="emailInput" type="email" placeholder="you@example.com" autocomplete="email" required>
+    <button class="btn big" id="sendBtn" type="submit">Send to my email</button>
+  </form>
+  <p id="emailMsg" class="saved"></p>
+  <div class="row">
+    <button class="btn ghost" data-go="arrange">← Back</button>
+    <button class="btn ghost" id="doneBtn">Skip / Done</button>
+  </div>
+</section>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
