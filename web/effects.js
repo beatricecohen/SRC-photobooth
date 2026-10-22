@@ -1,3 +1,4 @@
+import { MESH } from "./mesh.js";
 // Face effects drawn on canvas. Every effect draws in "face space":
 //   origin = midpoint between the eyes, 1 unit = face width, +x right, +y down, rotated with the head.
 // f = { top, chin, noseY, mouthY, px }  (px = face width in canvas pixels, used for shadow blur)
@@ -460,6 +461,144 @@ function smurf(c, f) {
   c.restore();
 }
 
+// ================= face warp engine =================
+// A filter may define: pre(c,f) (before the warp), morph([x,y],f) -> [x,y] (reshapes the face),
+// draw(c,f) (after the warp; f.M(p) gives where a face point ended up), post(ctx,w,h,faces) (whole frame).
+const snapC = document.createElement("canvas");
+function grab(c) {
+  const cv = c.canvas;
+  if (snapC.width !== cv.width || snapC.height !== cv.height) { snapC.width = cv.width; snapC.height = cv.height; }
+  const g = snapC.getContext("2d"); g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, cv.width, cv.height); g.drawImage(cv, 0, 0);
+  return snapC;
+}
+// Bowyer-Watson Delaunay, run once on the landmark layout of the first face we see
+function delaunay(P) {
+  const n = P.length, pts = [...P, [-30, -30], [30, -30], [0, 40]];
+  const mk = (a, b, c) => {
+    const [ax, ay] = pts[a], [bx, by] = pts[b], [cx, cy] = pts[c];
+    const d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by)) || 1e-12;
+    const ux = ((ax * ax + ay * ay) * (by - cy) + (bx * bx + by * by) * (cy - ay) + (cx * cx + cy * cy) * (ay - by)) / d;
+    const uy = ((ax * ax + ay * ay) * (cx - bx) + (bx * bx + by * by) * (ax - cx) + (cx * cx + cy * cy) * (bx - ax)) / d;
+    return { v: [a, b, c], ux, uy, r2: (ax - ux) ** 2 + (ay - uy) ** 2 };
+  };
+  let tris = [mk(n, n + 1, n + 2)];
+  for (let i = 0; i < n; i++) {
+    const [px, py] = pts[i], bad = [], keep = [];
+    for (const t of tris) ((px - t.ux) ** 2 + (py - t.uy) ** 2 < t.r2 ? bad : keep).push(t);
+    const edges = new Map();
+    for (const t of bad) for (const [p, q] of [[t.v[0], t.v[1]], [t.v[1], t.v[2]], [t.v[2], t.v[0]]]) {
+      const k = p < q ? `${p},${q}` : `${q},${p}`; edges.set(k, edges.has(k) ? null : [p, q]);
+    }
+    tris = keep;
+    for (const e of edges.values()) if (e) tris.push(mk(e[0], e[1], i));
+  }
+  return tris.map((t) => t.v).filter((v) => v.every((i) => i < n));
+}
+export const inPoly = (poly, x, y) => {
+  let ins = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i], [xj, yj] = poly[j];
+    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) ins = !ins;
+  }
+  return ins;
+};
+let TRIS = null;
+
+export function warpFace(c, f, M) {
+  if (!f.pts || !f.src) return;
+  if (!TRIS) {
+    const P = f.pts.slice(0, 468);
+    TRIS = delaunay(P).filter(([i, j, k]) => inPoly(f.oval0 || f.oval, (P[i][0] + P[j][0] + P[k][0]) / 3, (P[i][1] + P[j][1] + P[k][1]) / 3));
+  }
+  const snap = grab(c), D = f.pts.map((p) => M(p));
+  // a blurred copy of the old face goes underneath so a shrunken face never leaves a ghost
+  c.save();
+  c.beginPath(); (f.oval0 || f.oval).forEach(([x, y], i) => (i ? c.lineTo(x, y) : c.moveTo(x, y))); c.closePath(); c.clip();
+  c.resetTransform(); c.filter = `blur(${f.px * 0.07}px)`; c.drawImage(snap, 0, 0);
+  c.restore();
+  c.imageSmoothingQuality = "high";
+  for (const [i, j, k] of TRIS) {
+    const [s0, s1, s2] = [f.src[i], f.src[j], f.src[k]], [d0, d1, d2] = [D[i], D[j], D[k]];
+    const det = (s1[0] - s0[0]) * (s2[1] - s0[1]) - (s2[0] - s0[0]) * (s1[1] - s0[1]);
+    if (Math.abs(det) < 1e-3) continue;
+    const A = ((d1[0] - d0[0]) * (s2[1] - s0[1]) - (d2[0] - d0[0]) * (s1[1] - s0[1])) / det;
+    const C = ((d2[0] - d0[0]) * (s1[0] - s0[0]) - (d1[0] - d0[0]) * (s2[0] - s0[0])) / det;
+    const B = ((d1[1] - d0[1]) * (s2[1] - s0[1]) - (d2[1] - d0[1]) * (s1[1] - s0[1])) / det;
+    const Dd = ((d2[1] - d0[1]) * (s1[0] - s0[0]) - (d1[1] - d0[1]) * (s2[0] - s0[0])) / det;
+    const E = d0[0] - A * s0[0] - C * s0[1], F = d0[1] - B * s0[0] - Dd * s0[1];
+    const gx = (d0[0] + d1[0] + d2[0]) / 3, gy = (d0[1] + d1[1] + d2[1]) / 3;
+    const grow = (d) => [d[0] + Math.sign(d[0] - gx) * 0.004, d[1] + Math.sign(d[1] - gy) * 0.004];
+    c.save();
+    c.beginPath(); [d0, d1, d2].map(grow).forEach(([x, y], n) => (n ? c.lineTo(x, y) : c.moveTo(x, y))); c.closePath(); c.clip();
+    c.transform(A, B, C, Dd, E, F);
+    const x0 = Math.max(0, Math.min(s0[0], s1[0], s2[0]) - 3), y0 = Math.max(0, Math.min(s0[1], s1[1], s2[1]) - 3);
+    const x1 = Math.min(snap.width, Math.max(s0[0], s1[0], s2[0]) + 3), y1 = Math.min(snap.height, Math.max(s0[1], s1[1], s2[1]) + 3);
+    if (x1 > x0 && y1 > y0) c.drawImage(snap, x0, y0, x1 - x0, y1 - y0, x0, y0, x1 - x0, y1 - y0);
+    c.restore();
+  }
+}
+
+// ---------------- Monkey: reshapes the face (bigger muzzle, closer bigger eyes, sloping forehead) ----------------
+function monkeyMorph([x, y], f) {
+  const my = (f.noseY + f.mouthY) / 2;
+  let dx = 0, dy = 0;
+  const gm = Math.exp(-((x / 0.32) ** 2 + ((y - my - 0.03) / 0.3) ** 2));
+  dx += x * 0.42 * gm; dy += (y - my) * 0.3 * gm + 0.07 * gm;
+  for (const s of [-1, 1]) {
+    const ex = s * 0.22, ge = Math.exp(-(((x - ex) / 0.17) ** 2 + (y / 0.13) ** 2));
+    dx += ((x - ex) * 0.45 - s * 0.03) * ge; dy += (y * 0.45 - 0.01) * ge;
+  }
+  if (y < -0.12) dy += (-0.12 - y) * 0.3;
+  if (y > my + 0.25) dy += (y - my - 0.25) * 0.15;
+  dx += x * 0.06;
+  return [x + dx, y + dy];
+}
+function monkeyPre(c, f) {
+  for (const s of [-1, 1]) {   // big round ears behind the head
+    const ex = s * 0.55, ey = 0;
+    drop(c, f, 0.4);
+    c.fillStyle = rad(c, ex, ey, 0.02, 0.22, [[0, "#9a6a3e"], [1, "#4f2f15"]], ex - s * 0.04, ey - 0.05);
+    c.beginPath(); c.arc(ex, ey, 0.2, 0, 7); c.fill(); noDrop(c);
+    c.fillStyle = rad(c, ex, ey, 0.01, 0.17, [[0, "#f3cfab"], [1, "#d89f78"]]);
+    c.beginPath(); c.arc(ex - s * 0.03, ey, 0.13, 0, 7); c.fill();
+  }
+  tint(c, f, "#8a5a30", 0.93);
+}
+function monkeyDraw(c, f) {
+  const oval = f.oval;
+  c.save();
+  c.beginPath(); oval.forEach(([x, y], i) => (i ? c.lineTo(x, y) : c.moveTo(x, y))); c.closePath(); c.clip();
+  const my = f.M([0, (f.noseY + f.mouthY) / 2])[1];
+  c.beginPath();
+  for (const s of [-1, 1]) { c.moveTo(s * 0.17 + 0.23, 0); c.ellipse(s * 0.17, -0.01, 0.23, 0.19, s * 0.15, 0, 7); }
+  c.moveTo(0.36, my + 0.03); c.ellipse(0, my + 0.03, 0.36, 0.27, 0, 0, 7);
+  c.filter = `blur(${f.px * 0.012}px)`;
+  c.globalCompositeOperation = "color"; c.globalAlpha = 0.75; c.fillStyle = "#f1c9a0"; c.fill();
+  c.globalCompositeOperation = "soft-light"; c.globalAlpha = 0.7; c.fill();
+  c.restore();
+  c.save(); c.lineCap = "round"; c.lineWidth = 0.009;
+  oval.forEach(([x, y], i) => {
+    const l = Math.hypot(x, y - 0.1) || 1, ox = x / l, oy = (y - 0.1) / l;
+    for (let k = 0; k < 2; k++) {
+      c.strokeStyle = k % 2 ? "#6b4121" : "#4a2a12";
+      const o = (k - 0.5) * 0.02, len = 0.022 + ((i * 7 + k * 3) % 5) * 0.007;
+      c.beginPath(); c.moveTo(x - oy * o - ox * 0.015, y + ox * o - oy * 0.015); c.lineTo(x - oy * o + ox * len, y + ox * o + oy * len); c.stroke();
+    }
+  });
+  const [nx, ny] = f.M([0.04, f.noseY]);
+  c.fillStyle = "rgba(50,24,10,.85)";
+  for (const s of [-1, 1]) { c.beginPath(); c.ellipse(s * nx * 1.1, ny + 0.01, 0.024, 0.034, s * 0.4, 0, 7); c.fill(); }
+  c.strokeStyle = "rgba(55,28,12,.85)"; c.lineWidth = 0.045;
+  for (const s of [-1, 1]) { c.beginPath(); c.moveTo(s * 0.04, -0.17); c.quadraticCurveTo(s * 0.2, -0.24, s * 0.38, -0.14); c.stroke(); }
+  c.strokeStyle = "#4a2a12"; c.lineWidth = 0.03;
+  const tt = f.top + 0.12;
+  for (let i = -4; i <= 4; i++) {
+    const x = i * 0.065; c.beginPath(); c.moveTo(x, tt);
+    c.quadraticCurveTo(x + i * 0.03, tt - 0.12, x * 1.5, tt - 0.18 - (4 - Math.abs(i)) * 0.025); c.stroke();
+  }
+  c.restore();
+}
+
 function zombie(c, f) {
   c.save();
   tint(c, f, "#8da56e", 0.85);
@@ -485,6 +624,7 @@ export const EFFECTS = [
   { id: "minion", name: "Minion", z: 0, draw: minion },
   { id: "smurf", name: "Smurf", z: 0, draw: smurf },
   { id: "zombie", name: "Zombie", z: 0, draw: zombie },
+  { id: "monkey", name: "Monkey", z: 0, pre: monkeyPre, morph: monkeyMorph, draw: monkeyDraw },
   { id: "robot", name: "Robot head", z: 3, draw: robot },
   { id: "sunglasses", name: "Sunglasses", z: 2, draw: sunglasses },
   { id: "heartglasses", name: "Heart glasses", z: 2, draw: heartGlasses },
@@ -500,17 +640,26 @@ export const EFFECTS = [
   { id: "headphones", name: "Headphones", z: 3, draw: headphones },
 ];
 
+const warned = new Set();
+const safe = (e, fn) => { try { fn(); } catch (err) { if (!warned.has(e.id)) { warned.add(e.id); console.error("filter failed:", e.id, err); } } };
+
 export function drawEffects(ctx, faces, ids) {
-  const active = EFFECTS.filter((e) => ids.has(e.id)).sort((a, b) => a.z - b.z);
-  if (!active.length) return;
+  const act = EFFECTS.filter((e) => ids.has(e.id)).sort((a, b) => a.z - b.z);
+  if (!act.length) return;
+  const morphs = act.filter((e) => e.morph);
   for (const f of faces) {
-    for (const e of active) {
-      ctx.save();
-      ctx.translate(f.cx, f.cy); ctx.rotate(f.roll); ctx.scale(f.px, f.px);
-      e.draw(ctx, f);
-      ctx.restore();
+    ctx.save(); ctx.translate(f.cx, f.cy); ctx.rotate(f.roll); ctx.scale(f.px, f.px);
+    for (const e of act) if (e.pre) { ctx.save(); safe(e, () => e.pre(ctx, f)); ctx.restore(); }
+    let f2 = { ...f, oval0: f.oval, M: (p) => p };
+    if (morphs.length) {
+      const M = (p) => { let q = p; for (const e of morphs) q = e.morph(q, f); return q; };
+      f2 = { ...f, oval0: f.oval, M, oval: f.oval.map(M) };
+      ctx.save(); safe(morphs[0], () => warpFace(ctx, f2, M)); ctx.restore();
     }
+    for (const e of act) if (e.draw) { ctx.save(); safe(e, () => e.draw(ctx, f2)); ctx.restore(); }
+    ctx.restore();
   }
+  for (const e of act) if (e.post) { ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); safe(e, () => e.post(ctx, ctx.canvas.width, ctx.canvas.height, faces)); ctx.restore(); }
 }
 
 // Turn MediaPipe landmarks into a face frame in canvas pixels (mirrored, cover-fit like the video).
@@ -524,21 +673,31 @@ export function faceFrame(lm, cw, ch, vw, vh) {
   const cos = Math.cos(roll), sin = Math.sin(roll);
   const xy = (i) => { const p = P(i), dx = p.x - cx, dy = p.y - cy; return [(dx * cos + dy * sin) / px, (-dx * sin + dy * cos) / px]; };
   const loc = (i) => xy(i)[1];
-  return { cx, cy, roll, px, top: loc(10) - 0.06, chin: loc(152), noseY: loc(1), mouthY: loc(13), oval: OVAL.map(xy) };
+  const pts = Array.from({ length: 468 }, (_, i) => xy(i)), src = Array.from({ length: 468 }, (_, i) => { const p = P(i); return [p.x, p.y]; });
+  return { cx, cy, roll, px, top: loc(10) - 0.06, chin: loc(152), noseY: loc(1), mouthY: loc(13), oval: OVAL.map(xy), pts, src };
 }
 
-// Small preview card for the effect picker.
+// Small preview card for the effect picker: a cartoon face run through the real pipeline.
 export function drawIcon(canvas, effect) {
   const w = (canvas.width = 150), h = (canvas.height = 130), c = canvas.getContext("2d");
-  const px = 62;
-  c.translate(w / 2, h * 0.58); c.scale(px, px);
-  c.fillStyle = "#3a2f2a"; c.fillRect(-w, -h, w * 2, h * 2);
-  c.fillStyle = "#e0ac82"; c.beginPath(); c.ellipse(0, 0.1, 0.5, 0.7, 0, 0, 7); c.fill();
-  c.fillStyle = "#2a1c14"; c.beginPath(); c.ellipse(0, -0.2, 0.52, 0.55, 0, Math.PI, 0); c.fill();
-  c.fillStyle = "#e0ac82"; c.beginPath(); c.ellipse(0, -0.05, 0.44, 0.45, 0, Math.PI, 0); c.fill();
-  c.fillStyle = "#2a1c14";
-  for (const s of [-1, 1]) { c.beginPath(); c.ellipse(s * 0.22, 0, 0.045, 0.03, 0, 0, 7); c.fill(); }
-  c.strokeStyle = "#a8504a"; c.lineWidth = 0.03; c.beginPath(); c.arc(0, 0.3, 0.12, 0.2, Math.PI - 0.2); c.stroke();
-  const oval = Array.from({ length: 36 }, (_, i) => [Math.cos((i / 36) * 7) * 0.5, 0.1 + Math.sin((i / 36) * 7) * 0.7]);
-  effect.draw(c, { top: -0.62, chin: 0.78, noseY: 0.2, mouthY: 0.4, px, oval });
+  const px = 58, ox = w / 2, oy = h * 0.5;
+  const bg = c.createLinearGradient(0, 0, 0, h); bg.addColorStop(0, "#2a1450"); bg.addColorStop(1, "#150a2c");
+  c.fillStyle = bg; c.fillRect(0, 0, w, h);
+  c.save(); c.translate(ox, oy); c.scale(px, px);
+  const oval = MESH.oval;
+  c.fillStyle = "#2a1c14"; c.beginPath(); c.ellipse(0, -0.12, 0.6, 0.62, 0, 0, 7); c.fill();                   // hair
+  c.fillStyle = "#d9a37c"; c.beginPath(); oval.forEach(([x, y], i) => (i ? c.lineTo(x, y) : c.moveTo(x, y))); c.closePath(); c.fill(); // face
+  c.fillStyle = "#2a1c14"; c.beginPath(); c.ellipse(0, -0.28, 0.5, 0.2, 0, Math.PI, 0); c.fill();                // fringe
+  for (const s of [-1, 1]) {
+    c.fillStyle = "#fff"; c.beginPath(); c.ellipse(s * 0.2, 0, 0.075, 0.04, 0, 0, 7); c.fill();
+    c.fillStyle = "#2a1c14"; c.beginPath(); c.arc(s * 0.2, 0, 0.034, 0, 7); c.fill();
+    c.strokeStyle = "#2a1c14"; c.lineWidth = 0.02; c.beginPath(); c.moveTo(s * 0.1, -0.1); c.lineTo(s * 0.3, -0.09); c.stroke();
+  }
+  c.strokeStyle = "#b9805c"; c.lineWidth = 0.02; c.beginPath(); c.moveTo(0, 0.05); c.lineTo(-0.03, MESH.noseY - 0.03); c.lineTo(0.03, MESH.noseY - 0.01); c.stroke();
+  c.strokeStyle = "#9c4a44"; c.lineWidth = 0.03; c.lineCap = "round"; c.beginPath(); c.arc(0, MESH.mouthY - 0.07, 0.1, 0.25, Math.PI - 0.25); c.stroke();
+  c.restore();
+  const f = { cx: ox, cy: oy, roll: 0, px, top: MESH.top, chin: MESH.chin, noseY: MESH.noseY, mouthY: MESH.mouthY, oval, pts: MESH.pts, src: MESH.pts.map(([x, y]) => [ox + x * px, oy + y * px]) };
+  drawEffects(c, [f], new Set([effect.id]));
 }
+
+export { rrect, lin, rad, drop, noDrop, tint, grab, OVAL };
